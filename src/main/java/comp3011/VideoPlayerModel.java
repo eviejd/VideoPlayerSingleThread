@@ -13,6 +13,7 @@
 package comp3011;
 
 import java.io.File;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
@@ -46,9 +47,10 @@ public class VideoPlayerModel {
     private static final long NO_SEEK_REQUEST = -1;
     private static final long FIVE_SECONDS_US = 5_000_000L;
     private static final long AUDIO_LEAD_NS = 30_000_000L;
-
-    private static final int OUTPUT_QUEUE_CAPACITY = 4; 
-    private static final int PREROLL_FRAMES = 3;
+    private static final int STAGE_QUEUE_CAPACITY = 2; // Frames waiting between two pipeline stages
+    private static final int OUTPUT_QUEUE_CAPACITY = 4; // Finished frames waiting for display (back-pressure)
+    private static final int PREROLL_FRAMES = 3; // Frames to have buffered before the playback clock starts
+    private static final FrameJob END_OF_STREAM_JOB = new FrameJob(null, null);
     private static final PreparedFrame END_OF_STREAM = new PreparedFrame(null, -1, 0, 0);
 
     private final List<FrameProcessor> frameProcessors;
@@ -73,8 +75,10 @@ public class VideoPlayerModel {
     private FFmpegFrameGrabber grabber; // This is the 3rd party video media decoder. It deals in JavaCV Frame objects.
     private JavaFXFrameConverter converter; // Takes Frame objects to JavaFX Image objects, which can be put on screen.
     private AudioPlayer audioPlayer; // Our audio output. The JavaFX thread owns the line, the decoder only calls copySamples.
-    private Thread decoderThread; // Only ever assigned from the JavaFX thread
-    private volatile boolean decoderFinished; // Set by decoder thread when it reaches the end of the media
+    private final List<Thread> pipelineThreads = new ArrayList<>(); // Only touched from the JavaFX thread
+    private final List<BlockingQueue<FrameJob>> stageQueues = new ArrayList<>(); // JavaFX thread only (see stopPipeline)
+    private int pipelineGeneration; // Bumped on every start/stop so late errors from old threads can be ignored
+    private volatile boolean endOfStreamQueued; // Set by convert thread once END_OF_STREAM is on the output queue  
     private boolean audioAvailable; // Set before the decoder starts, so the decoder can read it safely
     private boolean displayOneFrameWhilePaused; // Lets a seek/start show one frame even while paused
     private boolean playbackOpen; // True when playback is happening
@@ -200,11 +204,11 @@ public class VideoPlayerModel {
         }
 
         try {
-            stopDecoder();
+            stopPipeline();
             grabber.setTimestamp(grabTimestampUs);
             resetPlaybackClock(logicalTimestampUs);
             flushAudioOutput();
-            startDecoder();
+            startPipeline();
             notifyPlaybackStateChanged();
         } catch (Exception e) {
             handlePlaybackError(e);
@@ -227,7 +231,7 @@ public class VideoPlayerModel {
             resetPlaybackClock(currentTimestampUs);
             playbackOpen = true;
             playbackTimer.start();
-            startDecoder();
+            startPipeline();
             notifyPlaybackStateChanged();
         } catch (Exception e) {
             handlePlaybackError(e);
@@ -286,88 +290,221 @@ public class VideoPlayerModel {
     }
 
 
-    // start the decoder on a separate thread
-    private void startDecoder() {
-        decoderFinished = false;
-        outputQueue.clear();
 
-        Thread thread = new Thread(this::decodeLoop, "video-decoder");
+    // start the pipeline and create the queues
+    private void startPipeline() {
+        endOfStreamQueued = false;
+        outputQueue.clear();
+        final int generation = ++pipelineGeneration;
+
+        int stageCount = frameProcessors.size();
+        stageQueues.clear();
+        for (int i = 0; i <= stageCount; i++) {
+            stageQueues.add(new ArrayBlockingQueue<>(STAGE_QUEUE_CAPACITY));
+        }
+
+        // get the queues now so the worker threads don't need to access the list
+        BlockingQueue<FrameJob> firstQueue = stageQueues.get(0);
+        BlockingQueue<FrameJob> lastQueue = stageQueues.get(stageCount);
+        launch("video-decoder", generation, () -> decodeLoop(firstQueue));
+
+        for (int i = 0; i < stageCount; i++) {
+            FrameProcessor processor = frameProcessors.get(i);
+            BlockingQueue<FrameJob> in = stageQueues.get(i);
+            BlockingQueue<FrameJob> out = stageQueues.get(i + 1);
+            String name = "effect-" + i + "-" + processor.getClass().getSimpleName();
+            launch(name, generation, () -> effectLoop(processor, in, out));
+        }
+
+        launch("video-convert", generation, () -> convertLoop(lastQueue));
+    }
+
+    private void launch(String name, int generation, StageBody body) {
+        Thread thread = new Thread(() -> runStage(generation, body), name);
         thread.setDaemon(true);
-        decoderThread = thread;
+        pipelineThreads.add(thread);
         thread.start();
     }
 
-    // stop the decoder and wait for it to finish before accessing its resources
-    private void stopDecoder() {
-        Thread thread = decoderThread;
-        decoderThread = null;
-        if (thread != null) {
+    // stop all pipeline threads before accessing or closing their resources
+    private void stopPipeline() {
+        pipelineGeneration++;
+        for (Thread thread : pipelineThreads) {
             thread.interrupt();
+        }
+        for (Thread thread : pipelineThreads) {
             try {
                 thread.join();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
+        pipelineThreads.clear();
+
+        // free any frames left in the queues
+        for (BlockingQueue<FrameJob> queue : stageQueues) {
+            FrameJob stranded;
+            while ((stranded = queue.poll()) != null) {
+                closeJob(stranded);
+            }
+        }
+        stageQueues.clear();
         outputQueue.clear();
     }
 
-    // decode and prepare frames on the worker thread
-    private void decodeLoop() {
+    // free the frame's native memory
+    private static void closeJob(FrameJob job) {
+        if (job != null && job.frame() != null) {
+            job.frame().close();
+        }
+    }
+
+    // close the frame if it can't be added to the queue
+    private static void putJob(BlockingQueue<FrameJob> queue, FrameJob job) throws InterruptedException {
         try {
-            while (!Thread.currentThread().isInterrupted()) {
-                Frame frame = grabFrame();
-                if (frame == null) {
-                    decoderFinished = true;
-                    outputQueue.put(END_OF_STREAM);
-                    return;
-                }
-
-                long timestampUs = grabber.getTimestamp();
-                if (audioAvailable && frame.samples != null) {
-                    queueAudio(timestampUs, frame);
-                }
-
-                if (frame.image == null) {
-                    continue;
-                }
-
-                if (!frameProcessorsInitialised) {
-                    initialiseFrameProcessors(new InfoVideo(
-                            mediaName(videoFile),
-                            totalVideoFrames,
-                            frame.imageWidth,
-                            frame.imageHeight,
-                            frame.imageDepth,
-                            frame.imageChannels,
-                            frame.imageStride,
-                            frameRate,
-                            intFrameRate,
-                            videoFrameDurationUs,
-                            grabber.getPixelFormat()));
-                    frameProcessorsInitialised = true;
-                }
-
-                int frameNumber = grabber.getFrameNumber();
-                InfoFrame info = new InfoFrame(frameNumber, timestampUs);
-                processFrame(frame, info);
-
-                Image image = converter.convert(frame);
-
-                // wait if the queue is full so we don't decode too far ahead
-                outputQueue.put(new PreparedFrame(image, frameNumber, timestampUs, System.nanoTime()));
-            }
+            queue.put(job);
         } catch (InterruptedException e) {
-            // expected when the decoder is stopped
+            closeJob(job);
+            throw e;
+        }
+    }
+
+    @FunctionalInterface
+    private interface StageBody {
+        void run() throws Exception;
+    }
+
+    // handle errors from pipeline threads on the javafx thread
+    private void runStage(int generation, StageBody body) {
+        try {
+            body.run();
+        } catch (InterruptedException e) {
+            // expected when the pipeline is stopped
         } catch (Exception e) {
-            final Thread self = Thread.currentThread();
             Platform.runLater(() -> {
-                if (decoderThread == self) {
+                if (generation == pipelineGeneration && playbackOpen) {
                     handlePlaybackError(e);
                 }
             });
         }
     }
+
+    // decode frames, handle audio and pass a copy to the next stage
+    private void decodeLoop(BlockingQueue<FrameJob> out) throws Exception {
+        while (!Thread.currentThread().isInterrupted()) {
+            Frame frame = grabFrame();
+            if (frame == null) {
+                out.put(END_OF_STREAM_JOB);
+                return;
+            }
+
+            long timestampUs = grabber.getTimestamp();
+            if (audioAvailable && frame.samples != null) {
+                queueAudio(timestampUs, frame);
+            }
+
+            if (frame.image == null) {
+                continue;
+            }
+
+            if (!frameProcessorsInitialised) {
+                // initialise processors before passing the first frame along
+                initialiseFrameProcessors(new InfoVideo(
+                        mediaName(videoFile),
+                        totalVideoFrames,
+                        frame.imageWidth,
+                        frame.imageHeight,
+                        frame.imageDepth,
+                        frame.imageChannels,
+                        frame.imageStride,
+                        frameRate,
+                        intFrameRate,
+                        videoFrameDurationUs,
+                        grabber.getPixelFormat()));
+                frameProcessorsInitialised = true;
+            }
+
+            int frameNumber = grabber.getFrameNumber();
+            InfoFrame info = new InfoFrame(frameNumber, timestampUs);
+
+            // copy the frame because the grabber reuses its image buffer
+            putJob(out, new FrameJob(copyImage(frame), info));
+        }
+    }
+
+    // run each frame through its processor
+    private void effectLoop(FrameProcessor processor, BlockingQueue<FrameJob> in, BlockingQueue<FrameJob> out)
+            throws Exception {
+        while (true) {
+            FrameJob job = in.take();
+            if (job == END_OF_STREAM_JOB) {
+                out.put(job);
+                return;
+            }
+
+            // make sure the frame is freed if processing fails
+            boolean passedOn = false;
+            try {
+                processor.process(job.frame(), job.info());
+                putJob(out, job);
+                passedOn = true;
+            } finally {
+                if (!passedOn) {
+                    closeJob(job);
+                }
+            }
+        }
+    }
+
+    // convert the processed frames into javafx images
+    private void convertLoop(BlockingQueue<FrameJob> in) throws Exception {
+        while (true) {
+            FrameJob job = in.take();
+            if (job == END_OF_STREAM_JOB) {
+                endOfStreamQueued = true;
+                outputQueue.put(END_OF_STREAM);
+                return;
+            }
+
+            Image image;
+            try {
+                image = converter.convert(job.frame());
+            } finally {
+                job.frame().close();
+            }
+            outputQueue.put(new PreparedFrame(
+                    image,
+                    job.info().frameNumber(),
+                    job.info().timestampUs(),
+                    System.nanoTime()));
+        }
+    }
+
+    // copy only the image data, not the audio samples
+    private Frame copyImage(Frame source) throws Exception {
+        if (!(source.image[0] instanceof ByteBuffer sourcePixels)) {
+            throw new Exception("Only byte-backed image frames are supported");
+        }
+
+        Frame copy = new Frame(
+                source.imageWidth,
+                source.imageHeight,
+                source.imageDepth,
+                source.imageChannels,
+                source.imageStride);
+
+        // use duplicate buffers so the original buffer positions aren't changed
+        ByteBuffer from = sourcePixels.duplicate();
+        ByteBuffer to = ((ByteBuffer) copy.image[0]).duplicate();
+        from.clear();
+        to.clear();
+        int byteCount = Math.min(from.remaining(), to.remaining());
+        from.limit(byteCount);
+        to.limit(byteCount);
+        to.put(from);
+        return copy;
+    }
+
 
     // update playback regularly on the javafx thread
     private void pumpPlayback(long now) {
@@ -394,7 +531,7 @@ public class VideoPlayerModel {
         if (firstTimestampUs == NO_SEEK_REQUEST) {
             // wait for a few frames before starting playback
             boolean readyToStart = pauseRequested
-                    || decoderFinished
+                    || endOfStreamQueued
                     || outputQueue.size() >= PREROLL_FRAMES;
             if (!readyToStart) {
                 return;
@@ -509,7 +646,7 @@ public class VideoPlayerModel {
     private void closePlaybackResources() {
         playbackTimer.stop();
         playbackOpen = false;
-        stopDecoder();
+        stopPipeline();
         pendingAudio.clear();
         firstTimestampUs = NO_SEEK_REQUEST;
         playbackStartNs = 0;
@@ -574,12 +711,6 @@ public class VideoPlayerModel {
         return Math.max(0, durationUs - frameDurationUs);
     }
 
-    private void processFrame(Frame frame, InfoFrame info) throws Exception {
-        for (FrameProcessor processor : frameProcessors) {
-            processor.process(frame, info);
-        }
-    }
-
     private void initialiseFrameProcessors(InfoVideo videoInfo) throws Exception {
         for (FrameProcessor processor : frameProcessors) {
             processor.initialise(videoInfo);
@@ -617,6 +748,11 @@ public class VideoPlayerModel {
 
     private void notifyAudioOutputStateChanged() {
         audioOutputStateChangedHandler.accept(audioOutputEnabled);
+    }
+    
+    private record FrameJob(
+            Frame frame,
+            InfoFrame info) {
     }
 
     private record PreparedFrame(
