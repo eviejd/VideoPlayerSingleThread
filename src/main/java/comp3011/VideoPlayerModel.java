@@ -4,12 +4,19 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Evie Durdin, a2957600
  *
  * Copyright 2026 Simon Ratcliffe
- *  *
- * Modification note: video decoding, effect processing and image conversion now run on a separate worker thread, with completed frames passed to the JavaFX thread using a bounded BlockingQueue
- */
+ *  
+ * Modification note: video decoding now runs through a multi-threaded pipeline, with a decoder thread, 
+ *  a thread for each frame processor and a convert thread connected by bounded blocking queues. 
+ *  The JavaFX thread only handles playback timing and displaying frames.
+ *  
+ *  AI assistance: I used Claude (Anthropic) as a development aid for guidance and problem-solving. 
+ *  I substantially modified, refined and integrated the suggested code into my own implementation, 
+ *  tested the final result and made sure I understood how everything worked.
+ *  
+   * */
 package comp3011;
 
 import java.io.File;

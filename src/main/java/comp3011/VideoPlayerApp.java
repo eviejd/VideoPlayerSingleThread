@@ -4,9 +4,13 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Evie Durdin, a2957600
  *
  * Copyright 2026 Simon Ratcliffe
+ * 
+ *  AI assistance: I used Claude (Anthropic) as a development aid for guidance and problem-solving. 
+ *  I substantially modified, refined and integrated the suggested code into my own implementation, 
+ *  tested the final result and made sure I understood how everything worked.
  */
 package comp3011;
 
