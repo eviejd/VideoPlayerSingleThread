@@ -19,6 +19,7 @@ package comp3011;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -33,37 +34,62 @@ import java.util.function.Supplier;
  * {@link FrameProcessor} objects for the {@link VideoPlayerModel} to apply to each frame
  * </p>
  */
+/**
+ * 
+ * Adding a new frame processor: create a new subclass of {@link FrameProcessor} and add one entry to
+ * {@link #EFFECT_OPTIONS}. This is all that is needed because the short flag, long flag, help text and argument
+ * parsing are handled automatically from this list. It also supports combining short flags (e.g. -nsw)
+ * and applying effects in the order they were entered. Duplicate flags are checked when the class loads, so any
+ * conflicts are caught straight away.
+ *
+ */
 public class CommandLineController {
-    private static final Map<String, Character> LONG_OPTIONS = Map.ofEntries(
-            Map.entry("--help", 'h'),
-            Map.entry("--audio", 'a'),
-            Map.entry("--maximise", 'x'),
-            Map.entry("--monitor-1", '1'),
-            Map.entry("--monitor-2", '2'),
-            Map.entry("--number-frames", 'n'),
-            Map.entry("--scratch-frames", 's'),
-            Map.entry("--flicker-frames", 'f'),
-            Map.entry("--black-and-white", 'w'),
-            Map.entry("--yellow-frames", 'y'),
-            Map.entry("--vignette-frame", 'v'),
-            Map.entry("--dust-frame", 'd'),
-            Map.entry("--jitter-frames", 'j'),
-            Map.entry("--mottle-frames", 'm'),
-            Map.entry("--bleed-frames", 'b'),
-            Map.entry("--pepper-frames", 'p'));
+    /**
+     * Stores the details for one frame processor option. The factory creates a new processor each time rather than
+     * reusing the same one, since each processor has its own state and its position in the effects list is used
+     * when generating its pseudo-random seed.
+     */
+    private record EffectOption(
+            char shortFlag, String longFlag, String description, Supplier<FrameProcessor> factory) {
+    }
 
-    private static final Map<Character, Supplier<FrameProcessor>> EFFECTS = Map.ofEntries(
-            Map.entry('n', FrameNumberer::new),
-            Map.entry('s', FrameScratcher::new),
-            Map.entry('f', FrameFlickerer::new),
-            Map.entry('w', FrameBlackAndWhiter::new),
-            Map.entry('y', FrameYellower::new),
-            Map.entry('v', FrameVignetter::new),
-            Map.entry('d', FrameDuster::new),
-            Map.entry('j', FrameJitterer::new),
-            Map.entry('m', FrameMottler::new),
-            Map.entry('b', FrameBleeder::new),
-            Map.entry('p', FramePepperer::new));
+    // Add new frame processor options here. This order is only used for displaying the help text.
+    // When running the program, effects are applied in the order the user enters them.
+    private static final List<EffectOption> EFFECT_OPTIONS = List.of(
+            new EffectOption('n', "--number-frames", "Render the frame number onto each frame", FrameNumberer::new),
+            new EffectOption('s', "--scratch-frames", "Render vertical film scratches", FrameScratcher::new),
+            new EffectOption('f', "--flicker-frames", "Randomly dim frames", FrameFlickerer::new),
+            new EffectOption('w', "--black-and-white", "Convert frames to black and white", FrameBlackAndWhiter::new),
+            new EffectOption('y', "--yellow-frames", "Apply a warmer colour temperature", FrameYellower::new),
+            new EffectOption('v', "--vignette-frame", "Darken the frame edges", FrameVignetter::new),
+            new EffectOption('d', "--dust-frame", "Render dust and hair marks", FrameDuster::new),
+            new EffectOption('j', "--jitter-frames", "Randomly displace frames by a few pixels", FrameJitterer::new),
+            new EffectOption('m', "--mottle-frames", "Add cloudy emulsion mottling", FrameMottler::new),
+            new EffectOption('b', "--bleed-frames", "Bleed light into frames", FrameBleeder::new),
+            new EffectOption('p', "--pepper-frames", "Pepper frames with dark spots/blotches", FramePepperer::new));
+
+    // These are the built-in options that control how the program starts, rather than changing the frames.
+    private static final Map<String, Character> CORE_LONG_OPTIONS = Map.of(
+            "--help", 'h',
+            "--audio", 'a',
+            "--maximise", 'x',
+            "--monitor-1", '1',
+            "--monitor-2", '2');
+
+    // These maps are built from the options above so short and long flags stay in sync.
+    private static final Map<String, Character> LONG_TO_SHORT = new HashMap<>(CORE_LONG_OPTIONS);
+    private static final Map<Character, EffectOption> EFFECTS_BY_SHORT = new HashMap<>();
+
+    static {
+        for (EffectOption option : EFFECT_OPTIONS) {
+            boolean duplicate = EFFECTS_BY_SHORT.put(option.shortFlag(), option) != null
+                    || LONG_TO_SHORT.put(option.longFlag(), option.shortFlag()) != null
+                    || CORE_LONG_OPTIONS.containsValue(option.shortFlag());
+            if (duplicate) {
+                throw new IllegalStateException("Duplicate command-line option: " + option.longFlag());
+            }
+        }
+    }
 
     private final String[] args;
     private final List<FrameProcessor> frameProcessors = new ArrayList<>();
@@ -110,6 +136,9 @@ public class CommandLineController {
         return maximiseRequested;
     }
     
+	 // The processors in the order they were entered on the command line. A copy is returned so callers
+	 // can't change the original list. The VideoPlayerModel takes ownership of the processors and gives
+	 // each one to its own pipeline thread.
     public List<FrameProcessor> getFrameProcessors() {
         return new ArrayList<>(frameProcessors);
     }
@@ -123,7 +152,7 @@ public class CommandLineController {
         List<String> videoFiles = new ArrayList<>();
         for (String arg : args) {
             if (arg.startsWith("--")) {
-                Character option = LONG_OPTIONS.get(arg);
+                Character option = LONG_TO_SHORT.get(arg);
                 if (option == null) {
                     setError("Unknown option: " + arg);
                 } else {
@@ -132,7 +161,7 @@ public class CommandLineController {
             } else if (arg.startsWith("-") && arg.length() > 1) {
                 // loop through each short option in case they're grouped together
                 for (char option : arg.substring(1).toCharArray()) {
-                    if (!LONG_OPTIONS.containsValue(option)) {
+                    if (!isKnownShortOption(option)) {
                         setError("Unknown option: -" + option);
                     } else {
                         handleOption(option);
@@ -161,6 +190,10 @@ public class CommandLineController {
             }
         }
     }
+    
+    private boolean isKnownShortOption(char option) {
+        return CORE_LONG_OPTIONS.containsValue(option) || EFFECTS_BY_SHORT.containsKey(option);
+    }
 
     private void handleOption(char option) {
         // set the matching option
@@ -170,7 +203,7 @@ public class CommandLineController {
             case 'x' -> maximiseRequested = true;
             case '1' -> setDisplayId(1);
             case '2' -> setDisplayId(2);
-            default -> frameProcessors.add(EFFECTS.get(option).get());
+            default -> frameProcessors.add(EFFECTS_BY_SHORT.get(option).factory().get());
         }
     }
 
@@ -200,17 +233,12 @@ public class CommandLineController {
         System.out.println("  -2, --monitor-2    Open the player on display 2");
         System.out.println();
         System.out.println("Frame processors:");
-        System.out.println("  -n, --number-frames    Render the frame number onto each frame");
-        System.out.println("  -s, --scratch-frames   Render vertical film scratches");
-        System.out.println("  -f, --flicker-frames   Randomly dim frames");
-        System.out.println("  -w, --black-and-white  Convert frames to black and white");
-        System.out.println("  -y, --yellow-frames    Apply a warmer colour temperature");
-        System.out.println("  -v, --vignette-frame   Darken the frame edges");
-        System.out.println("  -d, --dust-frame       Render dust and hair marks");
-        System.out.println("  -j, --jitter-frames    Randomly displace frames by a few pixels");
-        System.out.println("  -m, --mottle-frames    Add cloudy emulsion mottling");
-        System.out.println("  -b, --bleed-frames     Bleed light into frames");
-        System.out.println("  -p, --pepper-frames    Pepper frames with dark spots/blotches");
+        // Find the length of the longest flag so the descriptions all start in the same column.
+        int width = EFFECT_OPTIONS.stream().mapToInt(o -> o.longFlag().length()).max().orElse(0) + 2;
+        for (EffectOption option : EFFECT_OPTIONS) {
+            // Print each option with its short flag, long flag and description.
+            System.out.printf("  -%c, %-" + width + "s%s%n", option.shortFlag(), option.longFlag(), option.description());
+        }
         System.out.println();
         System.out.println("Frame processors are applied in command-line order and may be repeated.");
         System.out.println("Example: -nssnfwyvdjmbp numbers, scratches twice, numbers again, flickers,");
