@@ -352,8 +352,6 @@ public class VideoPlayerModel {
     private void launch(String name, int generation, StageBody body) {
         Thread thread = new Thread(() -> runStage(generation, body), name);
         thread.setDaemon(true);
-        // Below normal priority: when there are more busy pipeline threads than cores, the JavaFX thread (which draws every frame) can still pre-empt them and get a core when it needs one
-        thread.setPriority(Thread.NORM_PRIORITY - 1);
         pipelineThreads.add(thread);
         thread.start();
     }
