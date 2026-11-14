@@ -82,6 +82,8 @@ At 4K with 18 effects, neither version can keep up with real-time playback. The 
 
 With no effects, the pipeline keeps up with 4K playback. This suggests that the effects, rather than decoding, are the main thing slowing it down in this test.
 
+On TITAN's ladder, 1, 11 and 21 effects on movie.mp4 play in real time with no missed frames (about 1.9, 3.2 and 4.5 cores in use). At 41 effects frames are missed. The work needed roughly doubles from 21 to 41 effects, so it likely exceeds the cores available, but I could not confirm the machine's core count.
+
 To repeat the comparison, I used a separate worktree for the original Part 1 version. This test is manual rather than part of `mvn verify` because it needs the JavaFX window and a video file.
 
 ```bash
@@ -99,7 +101,7 @@ cd ../baseline && mvn -q javafx:run '-Djavafx.args=-bbbbbbbbbbmmmmvvvv /path/to/
 I haven't automated testing of the whole player because it requires a JavaFX window and an actual video file.
 
 ## Limits and trade-offs
-
+- The thread count is not capped at the core count. At 41 effects on TITAN the render thread competes with the workers and frames are missed. Capping the threads would be the next improvement.
 - There is one thread per effect, plus the decoder and conversion threads. Having more effects than available cores won't keep increasing performance, and the pipeline is still limited by its slowest stage.
 - The queues add about three frames of latency before playback starts, but help keep the playback smooth.
 - The player doesn't drop frames. If it can't keep up, it falls further behind instead of skipping frames. The original player behaved the same way.
