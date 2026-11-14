@@ -81,13 +81,17 @@ public class CommandLineController {
 
     static {
         for (EffectOption option : EFFECT_OPTIONS) {
-            boolean duplicate = EFFECTS_BY_SHORT.put(option.shortFlag(), option) != null;
-                    LONG_TO_SHORT.put("--vignette-frame", 'v');
-                    LONG_TO_SHORT.put("--dust-frame", 'd');
+            boolean duplicate = EFFECTS_BY_SHORT.put(option.shortFlag(), option) != null
+                    || LONG_TO_SHORT.put(option.longFlag(), option.shortFlag()) != null
+                    || CORE_LONG_OPTIONS.containsValue(option.shortFlag());
             if (duplicate) {
                 throw new IllegalStateException("Duplicate command-line option: " + option.longFlag());
             }
         }
+
+        // The written specification spells these two without the final "s", so keep accepting that too.
+        LONG_TO_SHORT.put("--vignette-frame", 'v');
+        LONG_TO_SHORT.put("--dust-frame", 'd');
     }
 
     private final String[] args;
