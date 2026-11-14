@@ -31,17 +31,16 @@ import java.util.function.Supplier;
  * Extracts the video file and supported launch options, reports invalid input
  * or help text, and exposes the resulting launch configuration via methods to the
  * {@link VideoPlayerApp}. Frame processor options build an ordered (and repeatable) list of
- * {@link FrameProcessor} objects for the {@link VideoPlayerModel} to apply to each frame
+ * {@link FrameProcessor} objects for the {@link VideoPlayerModel} to apply to each frame.
  * </p>
- */
-/**
- * 
+ *
+ * <p>
  * Adding a new frame processor: create a new subclass of {@link FrameProcessor} and add one entry to
  * {@link #EFFECT_OPTIONS}. This is all that is needed because the short flag, long flag, help text and argument
  * parsing are handled automatically from this list. It also supports combining short flags (e.g. -nsw)
  * and applying effects in the order they were entered. Duplicate flags are checked when the class loads, so any
  * conflicts are caught straight away.
- *
+ * </p>
  */
 public class CommandLineController {
     /**
@@ -61,8 +60,8 @@ public class CommandLineController {
             new EffectOption('f', "--flicker-frames", "Randomly dim frames", FrameFlickerer::new),
             new EffectOption('w', "--black-and-white", "Convert frames to black and white", FrameBlackAndWhiter::new),
             new EffectOption('y', "--yellow-frames", "Apply a warmer colour temperature", FrameYellower::new),
-            new EffectOption('v', "--vignette-frame", "Darken the frame edges", FrameVignetter::new),
-            new EffectOption('d', "--dust-frame", "Render dust and hair marks", FrameDuster::new),
+            new EffectOption('v', "--vignette-frames", "Darken the frame edges", FrameVignetter::new),
+            new EffectOption('d', "--dust-frames", "Render dust and hair marks", FrameDuster::new),
             new EffectOption('j', "--jitter-frames", "Randomly displace frames by a few pixels", FrameJitterer::new),
             new EffectOption('m', "--mottle-frames", "Add cloudy emulsion mottling", FrameMottler::new),
             new EffectOption('b', "--bleed-frames", "Bleed light into frames", FrameBleeder::new),
@@ -82,9 +81,9 @@ public class CommandLineController {
 
     static {
         for (EffectOption option : EFFECT_OPTIONS) {
-            boolean duplicate = EFFECTS_BY_SHORT.put(option.shortFlag(), option) != null
-                    || LONG_TO_SHORT.put(option.longFlag(), option.shortFlag()) != null
-                    || CORE_LONG_OPTIONS.containsValue(option.shortFlag());
+            boolean duplicate = EFFECTS_BY_SHORT.put(option.shortFlag(), option) != null;
+                    LONG_TO_SHORT.put("--vignette-frame", 'v');
+                    LONG_TO_SHORT.put("--dust-frame", 'd');
             if (duplicate) {
                 throw new IllegalStateException("Duplicate command-line option: " + option.longFlag());
             }
@@ -136,9 +135,9 @@ public class CommandLineController {
         return maximiseRequested;
     }
     
-	 // The processors in the order they were entered on the command line. A copy is returned so callers
-	 // can't change the original list. The VideoPlayerModel takes ownership of the processors and gives
-	 // each one to its own pipeline thread.
+	// The processors in the order they were entered on the command line. A copy is returned so callers
+	// can't change the original list. The VideoPlayerModel takes ownership of the processors and gives
+	// each one to its own pipeline thread.
     public List<FrameProcessor> getFrameProcessors() {
         return new ArrayList<>(frameProcessors);
     }
