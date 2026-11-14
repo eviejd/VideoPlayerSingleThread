@@ -40,16 +40,36 @@ import javafx.application.Platform;
 import javafx.scene.image.Image;
 
 /**
- * The model part of the video player model-view-controller architecture.
+ * The model part of the video player MVC architecture.
  *
  * <p>
- * Owns the FFmpeg decoder, playback clock, seeking logic, audio scheduling,
- * and frame processing - which it all manages through cooperative multi-tasking
- * on a single thread. It publishes decoded frames and playback state through
- * callbacks supplied by its owning {@link VideoPlayerController}, keeping it
- * decoupled from the JavaFX view.
+ * Manages video decoding, playback, seeking, audio and frame processing.
+ * Frames pass through a multi-threaded pipeline, with separate threads for
+ * decoding, effects and conversion before being displayed by JavaFX.
+ * </p>
+ *
+ * <p>
+ * Blocking queues pass frames safely between threads, maintain frame order
+ * and limit memory usage. Each thread manages its own resources to avoid
+ * conflicts. Pipeline threads are stopped and joined before resources are
+ * accessed or released during seeking and closing.
+ * </p>
+ * 
+ * <p>
+ * Thread ownership: the JavaFX thread owns the playback clock, pause state, the audio line, the view callbacks and
+ * starting and stopping the pipeline. The decoder thread owns the grabber and AudioPlayer.copySamples. Effect thread
+ * i owns processor i, and the convert thread owns the converter. A Frame belongs to one thread at a time. It is
+ * passed on by putting it on a queue, which also makes the previous thread's writes visible (happens-before), so
+ * pixel data needs no locks. The decoder deep-copies every frame because the grabber reuses its buffer.
+ * </p>
+ *
+ * <p>
+ * No deadlock: the queues form a one-way chain, no worker ever waits for the JavaFX thread (Platform.runLater does
+ * not block), the JavaFX thread only polls the output queue, and every blocking put and take responds to interrupt,
+ * so stopping the pipeline always ends every thread.
  * </p>
  */
+
 public class VideoPlayerModel {
     private static final long NO_SEEK_REQUEST = -1;
     private static final long FIVE_SECONDS_US = 5_000_000L;
@@ -57,6 +77,8 @@ public class VideoPlayerModel {
     private static final int STAGE_QUEUE_CAPACITY = 2; // Frames waiting between two pipeline stages
     private static final int OUTPUT_QUEUE_CAPACITY = 4; // Finished frames waiting for display (back-pressure)
     private static final int PREROLL_FRAMES = 3; // Frames to have buffered before the playback clock starts
+    // Markers pushed through the pipeline after the last frame so every stage (and finally the JavaFX thread) knows
+    // the video has ended. Compared by identity (==)
     private static final FrameJob END_OF_STREAM_JOB = new FrameJob(null, null);
     private static final PreparedFrame END_OF_STREAM = new PreparedFrame(null, -1, 0, 0);
 
@@ -211,6 +233,7 @@ public class VideoPlayerModel {
         }
 
         try {
+            // The grabber is not thread safe, so the whole pipeline must be completely stopped before we move it
             stopPipeline();
             grabber.setTimestamp(grabTimestampUs);
             resetPlaybackClock(logicalTimestampUs);
@@ -333,7 +356,11 @@ public class VideoPlayerModel {
         thread.start();
     }
 
-    // stop all pipeline threads before accessing or closing their resources
+    // Interrupt every pipeline thread and WAIT for all of them to finish. When this returns, nothing else is touching
+    // the grabber, converter or processors, so the JavaFX thread may safely use/close them.
+    // No deadlock is possible here: pipeline threads only ever block on queue put()/take(), which respond to
+    // interrupt, and no pipeline thread ever waits for the JavaFX thread (they only post work with
+    // Platform.runLater, which doesn't block)
     private void stopPipeline() {
         pipelineGeneration++;
         for (Thread thread : pipelineThreads) {
@@ -366,7 +393,8 @@ public class VideoPlayerModel {
         }
     }
 
-    // close the frame if it can't be added to the queue
+    // put() that never loses ownership of the frame: if we are interrupted while waiting for space, the frame is not
+    // on any queue, so nobody else would ever free it. Close it ourselves before propagating the interrupt
     private static void putJob(BlockingQueue<FrameJob> queue, FrameJob job) throws InterruptedException {
         try {
             queue.put(job);
@@ -396,7 +424,10 @@ public class VideoPlayerModel {
         }
     }
 
-    // decode frames, handle audio and pass a copy to the next stage
+    // Stage 1: decode. Also queues audio (the audio path stays on this thread) and takes a private COPY of each video
+    // frame. The copy is essential: FFmpegFrameGrabber reuses the same Frame/pixel buffer on the next grab() call, so
+    // handing the original down the pipeline would let the decoder overwrite pixels while effects are still working
+    // on them (frame tearing)
     private void decodeLoop(BlockingQueue<FrameJob> out) throws Exception {
         while (!Thread.currentThread().isInterrupted()) {
             Frame frame = grabFrame();
@@ -439,7 +470,8 @@ public class VideoPlayerModel {
         }
     }
 
-    // run each frame through its processor
+    // Stages 2..N+1: exactly one thread per processor, so the processor's mutable state is only ever used by one
+    // thread. Frames come out in the same order they went in because every queue is FIFO
     private void effectLoop(FrameProcessor processor, BlockingQueue<FrameJob> in, BlockingQueue<FrameJob> out)
             throws Exception {
         while (true) {
@@ -487,7 +519,8 @@ public class VideoPlayerModel {
         }
     }
 
-    // copy only the image data, not the audio samples
+    // Deep copy of just the image part of a frame (we don't need the audio samples down the pipeline, and
+    // Frame.clone() would copy those too)
     private Frame copyImage(Frame source) throws Exception {
         if (!(source.image[0] instanceof ByteBuffer sourcePixels)) {
             throw new Exception("Only byte-backed image frames are supported");
