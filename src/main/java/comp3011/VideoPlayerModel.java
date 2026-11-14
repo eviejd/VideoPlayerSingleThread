@@ -16,7 +16,7 @@
  *  I substantially modified, refined and integrated the suggested code into my own implementation, 
  *  tested the final result and made sure I understood how everything worked.
  *  
-   * */
+   */
 package comp3011;
 
 import java.io.File;
