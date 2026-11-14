@@ -11,6 +11,8 @@
  *  AI assistance: I used Claude (Anthropic) as a development aid for guidance and problem-solving. 
  *  I substantially modified, refined and integrated the suggested code into my own implementation, 
  *  tested the final result and made sure I understood how everything worked.
+ *  
+ * Modification note: hands the frame processor list through to VideoPlayerModel (Part 1)
  */
 package comp3011;
 

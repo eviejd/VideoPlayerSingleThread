@@ -4,9 +4,11 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Evie Durdin, a2957600
  *
  * Copyright 2026 Simon Ratcliffe
+ * 
+ * Modification note: comment-only change documenting which thread uses which fields.
  */
 package comp3011;
 
@@ -30,6 +32,13 @@ import org.bytedeco.javacv.Frame;
  * interleaved, little-endian PCM format required by {@link SourceDataLine}.
  * {@link VideoPlayerModel} singleton schedules when the resulting audio is
  * written and owns the AudioPlayer.
+ * </p>
+ * 
+ * <p>
+ * Threading: {@link #copySamples} runs on the decoder thread and uses only {@code outputBuffer}.
+ * {@link #open}, {@link #write}, {@link #flush} and {@link #close} run on the JavaFX thread and use only
+ * {@code line}. The two sets of fields are disjoint, so no locking is needed, as long as the model stops the
+ * pipeline before closing this object (it does).
  * </p>
  */
 public class AudioPlayer implements AutoCloseable {

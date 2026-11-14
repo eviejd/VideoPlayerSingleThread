@@ -138,12 +138,12 @@ class CommandLineControllerTest {
 
     @Test
     void helpListsEveryFrameProcessorOption() {
-        Run run = run("--help");
-        String help = run.output();
-        // Asking for help shouldn't count as an error, even if no video file was provided.
-        assertNull(run.controller().getErrorMessage());
-        assertTrue(help.contains("Frame processors:"));
-        for (String flag : List.of("-n, --number-frames", "-s, --scratch-frames", "-f, --flicker-frames",
+       Run run = run("--help");
+       String help = run.output();
+       // Asking for help shouldn't count as an error, even if no video file was provided.
+       assertNull(run.controller().getErrorMessage());
+       assertTrue(help.contains("Frame processors:"));
+       for (String flag : List.of("-n, --number-frames", "-s, --scratch-frames", "-f, --flicker-frames",
                 "-w, --black-and-white", "-y, --yellow-frames", "-v, --vignette-frames", "-d, --dust-frames",
                 "-j, --jitter-frames", "-m, --mottle-frames", "-b, --bleed-frames", "-p, --pepper-frames")) {
             assertTrue(help.contains(flag), "help is missing " + flag);
