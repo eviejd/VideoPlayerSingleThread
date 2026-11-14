@@ -7,3 +7,6 @@ target/
 error.log
 run.log
 run.log
+
+.DS_Store
+*.log
